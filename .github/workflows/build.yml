@@ -1,0 +1,94 @@
+name: Build and Deploy Flatpak Repo
+
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: "pages"
+  cancel-in-progress: false
+
+jobs:
+  build:
+    name: Build Flatpak
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/flathub-infra/flatpak-github-actions:freedesktop-25.08
+      options: --privileged
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build App
+        uses: flatpak/flatpak-github-actions/flatpak-builder@v6
+        with:
+          bundle: com.tencent.wemeet.flatpak
+          manifest-path: com.tencent.wemeet.yaml
+          branch: stable
+          cache: true
+          cache-key: flatpak-builder-wemeet-${{ github.sha }}
+
+      - name: Create OSTree Repo and Metadata
+        env:
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+          GITHUB_REPOSITORY_NAME: ${{ github.event.repository.name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+
+          mkdir -p repo
+          touch repo/.nojekyll
+          ostree init --repo=repo --mode=archive-z2
+
+          BUNDLE=$(find . -maxdepth 2 -name "com.tencent.wemeet*.flatpak" | head -n 1)
+          if [ -z "$BUNDLE" ]; then
+            echo "Error: Bundle file not found!"
+            exit 1
+          fi
+          echo "Importing bundle: $BUNDLE"
+          flatpak build-import-bundle repo "$BUNDLE"
+          flatpak build-update-repo \
+            --title="Wemeet Flatpak Repo" \
+            --comment="Tencent Meeting Flatpak Repository" \
+            --generate-static-deltas \
+            --prune \
+            repo
+
+          ./scripts/generate-repo-meta.sh repo
+
+      - name: Upload Repo Artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: repo
+          path: repo/
+          if-no-files-found: error
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Download Repo Artifact
+        uses: actions/download-artifact@v8
+        with:
+          name: repo
+          path: repo
+
+      - name: Upload Pages Artifact
+        uses: actions/upload-pages-artifact@v5.0.0
+        with:
+          path: repo
+          include-hidden-files: true
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v5
